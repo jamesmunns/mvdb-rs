@@ -2,6 +2,9 @@
 name = "mvdb"
 version = "0.1.0"
 authors = ["James Munns <james.munns@gmail.com>"]
+license = "MIT"
+repository = "https://github.com/jamesmunns/mvdb-rs"
+description = "Minimum Viable (Psuedo) Database"
 
 [dependencies]
 serde = "1.0"
@@ -9,4 +12,6 @@ serde_derive = "1.0"
 serde_json = "1.0"
 error-chain = "0.10"
 
-locked_accessors = {path="../locked_accessors"}
+[features]
+use-hashable = []
+default = ["use-hashable"]
