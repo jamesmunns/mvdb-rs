@@ -1,6 +1,9 @@
 #[macro_use] extern crate error_chain;
 extern crate serde;
-extern crate serde_json; // TODO: generic across all serializers/deserializers?
+
+// TODO: generic across all serializers/deserializers?
+#[cfg(feature = "use-json")] extern crate serde_json;
+#[cfg(feature = "use-toml")] extern crate toml;
 
 use std::fs::File;
 use std::io::prelude::*;
@@ -153,6 +156,7 @@ fn just_hash<T>(data: &T) -> u64
 /// Attempt to load the contents of a serialized file to a `T`.
 /// If anything goes wrong (file not available, schema mismatch),
 //  an error will be returned
+#[cfg(feature = "use-json")]
 pub fn just_load<T>(path: &Path) -> Result<T>
     where T: DeserializeOwned
 {
@@ -162,14 +166,40 @@ pub fn just_load<T>(path: &Path) -> Result<T>
     serde_json::from_str(&contents).chain_err(|| "Deserialize error")
 }
 
+/// Attempt to load the contents of a serialized file to a `T`.
+/// If anything goes wrong (file not available, schema mismatch),
+//  an error will be returned
+#[cfg(feature = "use-toml")]
+pub fn just_load<T>(path: &Path) -> Result<T>
+    where T: DeserializeOwned
+{
+    let mut file = File::open(path).chain_err(|| format!("Failed to open file: {:?}", &path))?;
+    let mut contents = String::new();
+    let _ = file.read_to_string(&mut contents);
+    toml::from_str(&contents).chain_err(|| "Deserialize error")
+}
+
 /// Attempt to write the contents of a `T` to a serialized file.
 /// If anything goes wrong (file not writable, serialization failed),
 //  an error will be returned
+#[cfg(feature = "use-json")]
 pub fn just_write<T>(contents: &T, path: &Path) -> Result<()>
     where T: Serialize
 {
     let mut file = File::create(path).chain_err(|| format!("Failed to create file: {:?}", path))?;
     let _ = file.write_all(&serde_json::to_string(contents).chain_err(|| "Failed to serialize")?.into_bytes()).chain_err(|| "Failed to write to file")?;
+    Ok(())
+}
+
+/// Attempt to write the contents of a `T` to a serialized file.
+/// If anything goes wrong (file not writable, serialization failed),
+//  an error will be returned
+#[cfg(feature = "use-toml")]
+pub fn just_write<T>(contents: &T, path: &Path) -> Result<()>
+    where T: Serialize
+{
+    let mut file = File::create(path).chain_err(|| format!("Failed to create file: {:?}", path))?;
+    let _ = file.write_all(&toml::to_string(contents).chain_err(|| "Failed to serialize")?.into_bytes()).chain_err(|| "Failed to write to file")?;
     Ok(())
 }
 
