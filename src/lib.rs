@@ -31,6 +31,17 @@ pub struct Mvdb<T>
     file_path: PathBuf,
 }
 
+/// Implement `Clone` manually, otherwise Rust expects `T` to also impl `Clone`,
+/// which is not necessary
+impl<T> Clone for Mvdb<T> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            file_path: self.file_path.clone(),
+        }
+    }
+}
+
 impl<T> Mvdb<T>
     where T: Serialize + DeserializeOwned
 {
