@@ -157,10 +157,11 @@ impl<T> Mvdb<T>
 /// Use the default hasher to obtain the hash of an item
 #[cfg(feature = "use-hashable")]
 fn just_hash<T>(data: &T) -> u64
-    where T: Hash
+    where T: Serialize
 {
     let mut hasher = DefaultHasher::new();
-    data.hash(&mut hasher);
+    let serialized = serde_json::to_string(data).expect("failed to serialize");
+    serialized.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -197,6 +198,7 @@ pub fn just_load<T>(path: &Path) -> Result<T>
 pub fn just_write<T>(contents: &T, path: &Path) -> Result<()>
     where T: Serialize
 {
+    println!("Wrote JSON");
     let mut file = File::create(path).chain_err(|| format!("Failed to create file: {:?}", path))?;
     let _ = file.write_all(&serde_json::to_string(contents).chain_err(|| "Failed to serialize")?.into_bytes()).chain_err(|| "Failed to write to file")?;
     Ok(())
