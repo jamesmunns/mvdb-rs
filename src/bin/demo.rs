@@ -26,13 +26,17 @@ struct InnerData {
     baz: String,
 }
 
+fn ugly(s: &str) -> ::std::result::Result<NotADb, serde_json::Error> {
+    serde_json::from_str(s)
+}
+
 fn run() -> Result<()> {
     // Create the database and storage file. If `demo.json` does not exist,
     // it will be created with default values
     let file = Path::new("demo.json");
     let db: Mvdb<NotADb, _> = Mvdb::from_file(&file,
                                               serde_json::to_string_pretty,
-                                              serde_json::from_str)?;
+                                              ugly)?;
 
     // Access the database contents atomically via a closure. You may
     // optionally return a value (of any type) from the closure, which will
