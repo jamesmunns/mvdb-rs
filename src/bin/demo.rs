@@ -2,9 +2,15 @@
 extern crate serde_derive;
 extern crate mvdb;
 
+#[cfg(feature = "use-json")]
+extern crate serde_json;
+
+#[cfg(feature = "use-toml")]
+extern crate toml;
+
 use std::path::Path;
 
-use mvdb::Mvdb;
+use mvdb::{Mvdb};
 use mvdb::errors::*;
 
 #[derive(Deserialize, Serialize, Debug, Default, Hash)]
@@ -24,7 +30,9 @@ fn run() -> Result<()> {
     // Create the database and storage file. If `demo.json` does not exist,
     // it will be created with default values
     let file = Path::new("demo.json");
-    let db: Mvdb<NotADb> = Mvdb::from_file_or_default(&file)?;
+    let db: Mvdb<NotADb, _> = Mvdb::from_file(&file,
+                                              serde_json::to_string_pretty,
+                                              serde_json::from_str)?;
 
     // Access the database contents atomically via a closure. You may
     // optionally return a value (of any type) from the closure, which will

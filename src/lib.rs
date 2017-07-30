@@ -27,49 +27,74 @@ pub mod errors {
 
 use errors::*;
 
+pub type MvdbSerializer<T, E> = fn(&T)
+    -> ::std::result::Result<String, E>;
+pub type MvdbDeserializer<T, E> = fn(&str)
+    -> ::std::result::Result<T, E>;
+
 /// Minimum Viable Psuedo Database
-pub struct Mvdb<T> {
+pub struct Mvdb<T, E> {
     inner: Arc<Mutex<T>>,
     file_path: PathBuf,
+    serializer: MvdbSerializer<T, E>,
+    deserializer: MvdbDeserializer<T, E>,
 }
 
 /// Implement `Clone` manually, otherwise Rust expects `T` to also impl `Clone`,
 /// which is not necessary
-impl<T> Clone for Mvdb<T> {
+impl<T, E> Clone for Mvdb<T, E> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
             file_path: self.file_path.clone(),
+            serializer: self.serializer,
+            deserializer: self.deserializer,
         }
     }
 }
 
-impl<T> Mvdb<T>
+impl<T, E> Mvdb<T, E>
 where
     T: Serialize + DeserializeOwned,
 {
     /// Create a new `Mvdb` given data to contain and path to store.
     /// File will be created and written to immediately
-    pub fn new(data: T, path: &Path) -> Result<Self> {
-        let new_self = Self::new_no_write(data, path);
+    pub fn new(
+        data: T,
+        path: &Path,
+        ser: MvdbSerializer<T, E>,
+        deser: MvdbDeserializer<T, E>,
+    ) -> Result<Self> {
+        let new_self = Self::new_no_write(data, path, ser, deser);
         new_self.write()?;
         Ok(new_self)
     }
 
     /// Create a new `Self`, but do not flush to file
-    fn new_no_write(data: T, path: &Path) -> Self {
+    fn new_no_write(
+        data: T,
+        path: &Path,
+        ser: MvdbSerializer<T, E>,
+        deser: MvdbDeserializer<T, E>,
+    ) -> Self {
         Self {
             inner: Arc::new(Mutex::new(data)),
             file_path: path.to_path_buf(),
+            serializer: ser,
+            deserializer: deser,
         }
     }
 
     /// Create a new `Mvdb` given just the path. If the file does
     /// not exist, or the contained data does not match the schema
     /// of `T`, this will return an Error
-    pub fn from_file(path: &Path) -> Result<Self> {
-        let contents = just_load(&path)?;
-        Ok(Self::new_no_write(contents, path))
+    pub fn from_file(
+        path: &Path,
+        ser: MvdbSerializer<T, E>,
+        deser: MvdbDeserializer<T, E>,
+    ) -> Result<Self> {
+        let contents = Self::just_load(deser, &path)?;
+        Ok(Self::new_no_write(contents, path, ser, deser))
     }
 
     /// Provide atomic writable access to the database contents via a closure.
@@ -81,12 +106,12 @@ where
     {
         let mut x = self.lock()?;
         let mut y = x.deref_mut();
-        let (_, hash_before) = hash_by_serialize(&y)?;
+        let (_, hash_before) = self.hash_by_serialize(&y)?;
         let ret = action(y);
-        let (ser, hash_after) = hash_by_serialize(&y)?;
+        let (ser, hash_after) = self.hash_by_serialize(&y)?;
 
         if hash_before != hash_after {
-            just_write_string(&ser, &self.file_path)?;
+            Self::just_write_string(&self.file_path, &ser)?;
         }
 
         Ok(ret)
@@ -115,7 +140,7 @@ where
 
     /// Raw write to file without locks
     fn write_locked(&self, inner: &T) -> Result<()> {
-        just_write(&inner.deref(), &self.file_path)
+        Self::just_write(self.serializer, &self.file_path, inner)
     }
 
     /// Return the MutexGuard for `Mvdb`
@@ -125,112 +150,74 @@ where
             Ok(lock) => Ok(lock),
         }
     }
-}
 
-impl<T> Mvdb<T>
-where
-    T: Serialize + DeserializeOwned + Default,
-{
-    /// Create a new `Mvdb` given data to contain and path to store.
-    /// File will be created and written to immediately
-    pub fn from_file_or_default(path: &Path) -> Result<Self> {
-        match just_load(path) {
-            Ok(data) => Ok(Self::new_no_write(data, path)),
-            Err(_) => Self::new(T::default(), path),
+    /// Use the default hasher to obtain the hash of an item
+    fn hash_by_serialize(&self, data: &T) -> Result<(String, u64)>
+    where
+        T: Serialize,
+    {
+        let mut hasher = DefaultHasher::new();
+        let serialized = match (self.serializer)(data) {
+            Ok(ser) => ser,
+            Err(_) => bail!("failed to serialize"),
+        };
+        serialized.hash(&mut hasher);
+        Ok((serialized, hasher.finish()))
+    }
+
+    /// Attempt to write the contents to a serialized file.
+    /// Useful when the contents have already been serialized
+    pub fn just_write_string(path: &PathBuf, contents: &str) -> Result<()> {
+        let mut file = File::create(path)
+            .chain_err(|| format!("Failed to create file: {:?}", path))?;
+        let _ = file.write_all(contents.as_bytes())
+            .chain_err(|| "Failed to write to file")?;
+        Ok(())
+    }
+
+    /// Attempt to write the contents of a `T` to a serialized file.
+    /// If anything goes wrong (file not writable, serialization failed),
+    //  an error will be returned
+    pub fn just_write(ser: MvdbSerializer<T, E>, path: &PathBuf, data: &T) -> Result<()> {
+        let serialized = match (ser)(data) {
+            Ok(ser) => ser,
+            Err(_) => bail!("failed to serialize"),
+        };
+        Self::just_write_string(path, &serialized)
+    }
+
+    /// Attempt to load the contents of a serialized file to a `T`.
+    /// If anything goes wrong (file not available, schema mismatch),
+    //  an error will be returned
+    pub fn just_load(deser: MvdbDeserializer<T, E>, path: &Path) -> Result<T> {
+        let mut file = File::open(path)
+            .chain_err(|| format!("Failed to open file: {:?}", &path))?;
+        let mut contents = String::new();
+        let _ = file.read_to_string(&mut contents);
+
+        match (deser)(&contents) {
+            Ok(deser) => Ok(deser),
+            Err(_) => bail!("failed to deserialize"),
         }
     }
 }
 
-/// Use the default hasher to obtain the hash of an item
-#[cfg(feature = "use-json")]
-fn hash_by_serialize<T>(data: &T) -> Result<(String, u64)>
-where
-    T: Serialize,
-{
-    let mut hasher = DefaultHasher::new();
-    let serialized = serde_json::to_string(data)
-        .chain_err(|| "Failed to serialize for hashing")?;
-    serialized.hash(&mut hasher);
-    Ok((serialized, hasher.finish()))
-}
 
-/// Use the default hasher to obtain the hash of an item
-#[cfg(feature = "use-toml")]
-fn hash_by_serialize<T>(data: &T) -> Result<(String, u64)>
-where
-    T: Serialize,
-{
-    let mut hasher = DefaultHasher::new();
-    let serialized = toml::to_string(data)
-        .chain_err(|| "Failed to serialize for hashing")?;
-    serialized.hash(&mut hasher);
-    Ok((serialized, hasher.finish()))
-}
 
-/// Attempt to load the contents of a serialized file to a `T`.
-/// If anything goes wrong (file not available, schema mismatch),
-//  an error will be returned
-#[cfg(feature = "use-json")]
-pub fn just_load<T>(path: &Path) -> Result<T>
-where
-    T: DeserializeOwned,
-{
-    let mut file = File::open(path)
-        .chain_err(|| format!("Failed to open file: {:?}", &path))?;
-    let mut contents = String::new();
-    let _ = file.read_to_string(&mut contents);
-    serde_json::from_str(&contents).chain_err(|| "Deserialize error")
-}
+// impl<T,E> Mvdb<T,E>
+// where
+//     T: Serialize + DeserializeOwned + Default,
+// {
+//     /// Create a new `Mvdb` given data to contain and path to store.
+//     /// File will be created and written to immediately
+//     pub fn from_file_or_default(&self, path: &Path, ser: MvdbSerializer<T,E>, deser: MvdbDeserializer<T,E>) -> Result<Self> {
+//         match self.just_load(path) {
+//             Ok(data) => Ok(Self::new_no_write(data, path, ser, deser)),
+//             Err(_) => Self::new(T::default(), path, ser, deser),
+//         }
+//     }
+// }
 
-/// Attempt to load the contents of a serialized file to a `T`.
-/// If anything goes wrong (file not available, schema mismatch),
-//  an error will be returned
-#[cfg(feature = "use-toml")]
-pub fn just_load<T>(path: &Path) -> Result<T>
-where
-    T: DeserializeOwned,
-{
-    let mut file = File::open(path)
-        .chain_err(|| format!("Failed to open file: {:?}", &path))?;
-    let mut contents = String::new();
-    let _ = file.read_to_string(&mut contents);
-    toml::from_str(&contents).chain_err(|| "Deserialize error")
-}
-
-/// Attempt to write the contents of a `T` to a serialized file.
-/// If anything goes wrong (file not writable, serialization failed),
-//  an error will be returned
-#[cfg(feature = "use-json")]
-pub fn just_write<T>(contents: &T, path: &Path) -> Result<()>
-where
-    T: Serialize,
-{
-    just_write_string(&serde_json::to_string(contents)
-        .chain_err(|| "Failed to serialize")?, path)
-}
-
-/// Attempt to write the contents of a `T` to a serialized file.
-/// If anything goes wrong (file not writable, serialization failed),
-//  an error will be returned
-#[cfg(feature = "use-toml")]
-pub fn just_write<T>(contents: &T, path: &Path) -> Result<()>
-where
-    T: Serialize,
-{
-    just_write_string(&toml::to_string(contents)
-        .chain_err(|| "Failed to serialize")?, path)
-}
-
-/// Attempt to write the contents to a serialized file.
-/// Useful when the contents have already been serialized
-pub fn just_write_string(contents: &str, path: &Path) -> Result<()>
-{
-    let mut file = File::create(path)
-        .chain_err(|| format!("Failed to create file: {:?}", path))?;
-    let _ = file.write_all(contents.as_bytes())
-        .chain_err(|| "Failed to write to file")?;
-    Ok(())
-}
 
 #[cfg(test)]
 mod tests {
