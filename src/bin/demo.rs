@@ -1,4 +1,5 @@
-#[macro_use] extern crate serde_derive;
+#[macro_use]
+extern crate serde_derive;
 extern crate mvdb;
 
 use std::path::Path;
@@ -42,13 +43,12 @@ fn run() -> Result<()> {
 
     // Access the database contents atomically via a closure. You may
     // optionally return a value (of any type) from the closure, which will
-    // be wrapped in a Result. When using the `use-hashable` feature, changes
-    // will be written if the database contents changed. Otherwise, the file
-    // will be rewritten after every `access_mut()`
+    // be wrapped in a Result. Changes will be written if the database contents
+    // changed
     let z = "thisisatest".into();
     let x = InnerData {
         foo: "tacos".into(),
-        bar: vec!(0, 1, 2),
+        bar: vec![0, 1, 2],
         baz: "burritos".into(),
     };
 
@@ -63,4 +63,3 @@ fn run() -> Result<()> {
 fn main() {
     assert!(run().is_ok());
 }
-

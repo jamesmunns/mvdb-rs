@@ -1,6 +1,6 @@
 [package]
 name = "mvdb"
-version = "0.1.2"
+version = "0.2.0"
 authors = ["James Munns <james.munns@gmail.com>"]
 license = "MIT"
 repository = "https://github.com/jamesmunns/mvdb-rs"
@@ -20,7 +20,6 @@ version = "0.4"
 optional = true
 
 [features]
-use-hashable = []
 use-toml = ["toml"]
 use-json = ["serde_json"]
-default = ["use-hashable", "use-json"]
+default = ["use-json"]
