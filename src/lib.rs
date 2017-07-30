@@ -29,20 +29,20 @@ use errors::*;
 
 pub type MvdbSerializer<T, E> = fn(&T)
     -> ::std::result::Result<String, E>;
-pub type MvdbDeserializer<T, E> = fn(&str)
+pub type MvdbDeserializer<'a, T, E> = fn(&'a str)
     -> ::std::result::Result<T, E>;
 
 /// Minimum Viable Psuedo Database
-pub struct Mvdb<T, E> {
+pub struct Mvdb<'a, T, E> {
     inner: Arc<Mutex<T>>,
     file_path: PathBuf,
     serializer: MvdbSerializer<T, E>,
-    deserializer: MvdbDeserializer<T, E>,
+    deserializer: MvdbDeserializer<'a, T, E>,
 }
 
 /// Implement `Clone` manually, otherwise Rust expects `T` to also impl `Clone`,
 /// which is not necessary
-impl<T, E> Clone for Mvdb<T, E> {
+impl<'a, T, E> Clone for Mvdb<'a, T, E> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
@@ -53,7 +53,7 @@ impl<T, E> Clone for Mvdb<T, E> {
     }
 }
 
-impl<T, E> Mvdb<T, E>
+impl<'a, T, E> Mvdb<'a, T, E>
 where
     T: Serialize + DeserializeOwned,
 {
@@ -63,7 +63,7 @@ where
         data: T,
         path: &Path,
         ser: MvdbSerializer<T, E>,
-        deser: MvdbDeserializer<T, E>,
+        deser: MvdbDeserializer<'a, T, E>,
     ) -> Result<Self> {
         let new_self = Self::new_no_write(data, path, ser, deser);
         new_self.write()?;
@@ -75,7 +75,7 @@ where
         data: T,
         path: &Path,
         ser: MvdbSerializer<T, E>,
-        deser: MvdbDeserializer<T, E>,
+        deser: MvdbDeserializer<'a, T, E>,
     ) -> Self {
         Self {
             inner: Arc::new(Mutex::new(data)),
@@ -91,7 +91,7 @@ where
     pub fn from_file(
         path: &Path,
         ser: MvdbSerializer<T, E>,
-        deser: MvdbDeserializer<T, E>,
+        deser: MvdbDeserializer<'a, T, E>,
     ) -> Result<Self> {
         let contents = Self::just_load(deser, &path)?;
         Ok(Self::new_no_write(contents, path, ser, deser))
@@ -189,7 +189,7 @@ where
     /// Attempt to load the contents of a serialized file to a `T`.
     /// If anything goes wrong (file not available, schema mismatch),
     //  an error will be returned
-    pub fn just_load(deser: MvdbDeserializer<T, E>, path: &Path) -> Result<T> {
+    pub fn just_load(deser: MvdbDeserializer<'a, T, E>, path: &Path) -> Result<T> {
         let mut file = File::open(path)
             .chain_err(|| format!("Failed to open file: {:?}", &path))?;
         let mut contents = String::new();
