@@ -3,10 +3,7 @@ extern crate error_chain;
 extern crate serde;
 
 // TODO: generic across all serializers/deserializers?
-#[cfg(feature = "use-json")]
 extern crate serde_json;
-#[cfg(feature = "use-toml")]
-extern crate toml;
 
 use std::fs::File;
 use std::io::prelude::*;
@@ -31,6 +28,7 @@ use errors::*;
 pub struct Mvdb<T> {
     inner: Arc<Mutex<T>>,
     file_path: PathBuf,
+    pretty: bool,
 }
 
 /// Implement `Clone` manually, otherwise Rust expects `T` to also impl `Clone`,
@@ -40,6 +38,7 @@ impl<T> Clone for Mvdb<T> {
         Self {
             inner: self.inner.clone(),
             file_path: self.file_path.clone(),
+            pretty: self.pretty,
         }
     }
 }
@@ -50,26 +49,27 @@ where
 {
     /// Create a new `Mvdb` given data to contain and path to store.
     /// File will be created and written to immediately
-    pub fn new(data: T, path: &Path) -> Result<Self> {
-        let new_self = Self::new_no_write(data, path);
+    pub fn new(data: T, path: &Path, pretty: bool) -> Result<Self> {
+        let new_self = Self::new_no_write(data, path, pretty);
         new_self.write()?;
         Ok(new_self)
     }
 
     /// Create a new `Self`, but do not flush to file
-    fn new_no_write(data: T, path: &Path) -> Self {
+    fn new_no_write(data: T, path: &Path, pretty: bool) -> Self {
         Self {
             inner: Arc::new(Mutex::new(data)),
             file_path: path.to_path_buf(),
+            pretty: pretty,
         }
     }
 
     /// Create a new `Mvdb` given just the path. If the file does
     /// not exist, or the contained data does not match the schema
     /// of `T`, this will return an Error
-    pub fn from_file(path: &Path) -> Result<Self> {
+    pub fn from_file(path: &Path, pretty: bool) -> Result<Self> {
         let contents = just_load(&path)?;
-        Ok(Self::new_no_write(contents, path))
+        Ok(Self::new_no_write(contents, path, pretty))
     }
 
     /// Provide atomic writable access to the database contents via a closure.
@@ -81,9 +81,9 @@ where
     {
         let mut x = self.lock()?;
         let mut y = x.deref_mut();
-        let (_, hash_before) = hash_by_serialize(&y)?;
+        let (_, hash_before) = hash_by_serialize(&y, self.pretty)?;
         let ret = action(y);
-        let (ser, hash_after) = hash_by_serialize(&y)?;
+        let (ser, hash_after) = hash_by_serialize(&y, self.pretty)?;
 
         if hash_before != hash_after {
             just_write_string(&ser, &self.file_path)?;
@@ -115,7 +115,7 @@ where
 
     /// Raw write to file without locks
     fn write_locked(&self, inner: &T) -> Result<()> {
-        just_write(&inner.deref(), &self.file_path)
+        just_write(&inner.deref(), &self.file_path, self.pretty)
     }
 
     /// Return the MutexGuard for `Mvdb`
@@ -133,35 +133,26 @@ where
 {
     /// Create a new `Mvdb` given data to contain and path to store.
     /// File will be created and written to immediately
-    pub fn from_file_or_default(path: &Path) -> Result<Self> {
+    pub fn from_file_or_default(path: &Path, pretty: bool) -> Result<Self> {
         match just_load(path) {
-            Ok(data) => Ok(Self::new_no_write(data, path)),
-            Err(_) => Self::new(T::default(), path),
+            Ok(data) => Ok(Self::new_no_write(data, path, pretty)),
+            Err(_) => Self::new(T::default(), path, pretty),
         }
     }
 }
 
 /// Use the default hasher to obtain the hash of an item
-#[cfg(feature = "use-json")]
-fn hash_by_serialize<T>(data: &T) -> Result<(String, u64)>
+fn hash_by_serialize<T>(data: &T, pretty: bool) -> Result<(String, u64)>
 where
     T: Serialize,
 {
-    let mut hasher = DefaultHasher::new();
-    let serialized = serde_json::to_string(data)
-        .chain_err(|| "Failed to serialize for hashing")?;
-    serialized.hash(&mut hasher);
-    Ok((serialized, hasher.finish()))
-}
+    let serializer = match pretty {
+        true => serde_json::to_string_pretty,
+        false => serde_json::to_string,
+    };
 
-/// Use the default hasher to obtain the hash of an item
-#[cfg(feature = "use-toml")]
-fn hash_by_serialize<T>(data: &T) -> Result<(String, u64)>
-where
-    T: Serialize,
-{
     let mut hasher = DefaultHasher::new();
-    let serialized = toml::to_string(data)
+    let serialized = serializer(data)
         .chain_err(|| "Failed to serialize for hashing")?;
     serialized.hash(&mut hasher);
     Ok((serialized, hasher.finish()))
@@ -170,7 +161,6 @@ where
 /// Attempt to load the contents of a serialized file to a `T`.
 /// If anything goes wrong (file not available, schema mismatch),
 //  an error will be returned
-#[cfg(feature = "use-json")]
 pub fn just_load<T>(path: &Path) -> Result<T>
 where
     T: DeserializeOwned,
@@ -182,44 +172,22 @@ where
     serde_json::from_str(&contents).chain_err(|| "Deserialize error")
 }
 
-/// Attempt to load the contents of a serialized file to a `T`.
-/// If anything goes wrong (file not available, schema mismatch),
-//  an error will be returned
-#[cfg(feature = "use-toml")]
-pub fn just_load<T>(path: &Path) -> Result<T>
-where
-    T: DeserializeOwned,
-{
-    let mut file = File::open(path)
-        .chain_err(|| format!("Failed to open file: {:?}", &path))?;
-    let mut contents = String::new();
-    let _ = file.read_to_string(&mut contents);
-    toml::from_str(&contents).chain_err(|| "Deserialize error")
-}
-
 /// Attempt to write the contents of a `T` to a serialized file.
 /// If anything goes wrong (file not writable, serialization failed),
 //  an error will be returned
-#[cfg(feature = "use-json")]
-pub fn just_write<T>(contents: &T, path: &Path) -> Result<()>
+pub fn just_write<T>(contents: &T, path: &Path, pretty: bool) -> Result<()>
 where
     T: Serialize,
 {
-    just_write_string(&serde_json::to_string(contents)
+    let serializer = match pretty {
+        true => serde_json::to_string_pretty,
+        false => serde_json::to_string,
+    };
+
+    just_write_string(&serializer(contents)
         .chain_err(|| "Failed to serialize")?, path)
 }
 
-/// Attempt to write the contents of a `T` to a serialized file.
-/// If anything goes wrong (file not writable, serialization failed),
-//  an error will be returned
-#[cfg(feature = "use-toml")]
-pub fn just_write<T>(contents: &T, path: &Path) -> Result<()>
-where
-    T: Serialize,
-{
-    just_write_string(&toml::to_string(contents)
-        .chain_err(|| "Failed to serialize")?, path)
-}
 
 /// Attempt to write the contents to a serialized file.
 /// Useful when the contents have already been serialized

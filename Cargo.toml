@@ -10,16 +10,4 @@ description = "Minimum Viable (Psuedo) Database"
 serde = "1.0"
 serde_derive = "1.0"
 error-chain = "0.10"
-
-[dependencies.serde_json]
-version = "1.0"
-optional = true
-
-[dependencies.toml]
-version = "0.4"
-optional = true
-
-[features]
-use-toml = ["toml"]
-use-json = ["serde_json"]
-default = ["use-json"]
+serde_json = "1.0"

@@ -7,13 +7,13 @@ use std::path::Path;
 use mvdb::Mvdb;
 use mvdb::errors::*;
 
-#[derive(Deserialize, Serialize, Debug, Default, Hash)]
+#[derive(Deserialize, Serialize, Debug, Default)]
 struct NotADb {
     just_one: InnerData,
     multiple: Vec<InnerData>,
 }
 
-#[derive(Deserialize, Serialize, Debug, Default, Hash)]
+#[derive(Deserialize, Serialize, Debug, Default)]
 struct InnerData {
     foo: String,
     bar: Vec<u8>,
@@ -24,7 +24,7 @@ fn run() -> Result<()> {
     // Create the database and storage file. If `demo.json` does not exist,
     // it will be created with default values
     let file = Path::new("demo.json");
-    let db: Mvdb<NotADb> = Mvdb::from_file_or_default(&file)?;
+    let db: Mvdb<NotADb> = Mvdb::from_file_or_default(&file, false)?;
 
     // Access the database contents atomically via a closure. You may
     // optionally return a value (of any type) from the closure, which will
