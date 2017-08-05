@@ -59,9 +59,12 @@
 //! ## Example
 //!
 //! ```rust
-//! #[macro_use] extern crate serde_derive;
+//! [macro_use] extern crate serde_derive;
+//! extern crate serde;
 //! extern crate mvdb;
+//!
 //! use std::path::Path;
+//! use mvdb::Mvdb;
 //!
 //! #[derive(Deserialize, Serialize)]
 //! struct DemoData {
@@ -71,7 +74,7 @@
 //! }
 //!
 //! fn main() {
-//!     let file = Path::from_file("demo.json")
+//!     let file = Path::new("demo.json");
 //!     let my_data: Mvdb<DemoData> = Mvdb::from_file(&file)
 //!         .expect("File does not exist, or schema mismatch");
 //!
