@@ -1,89 +1,110 @@
 # MVDB: Minimum Viable (Psuedo) Database
 
+* [Documentation](https://docs.rs/mvdb)
+* [Crates.io](https://crates.io/crates/mvdb)
+
 Have you ever thought to yourself, "I would like to keep some data persistently, but can't be bothered to do it well or performantly"? Well, you've found just the right library.
 
 If your use case is:
 
 * Very rare writes, but lots of reads
-* Data is shared across multiple threads
+* Data access is shared across multiple threads
 * Your data structure is not particularly large
 * You are already using `Serde` to serialize some or all of your data
 * Your use case feels a little too simple to use even `sqlite`
 * Your data format/schema never changes, or only changes by adding, or you are willing to handle migrations yourself
-* Optional: Your data is hashable
 
 Then you might like `mvdb`!
+
+## How it works
+
+`mvdb` takes a `Serializable` and `Deserializable` Rust data structure, and uses `serde_json` to represent this data in
+a file. After the initial file load, all read-accesses are made from in-memory, rather than re-reading from file. After any
+mutable or read-write-access, the contents of the data is checked for changes. If the contents have been modified, they
+will be pushed back to the file. All accesses, read-only and read-write, are made atomically.
+
+Access to the structure is made in a transactional manner, via closures. Care should be taken not to block within these closures,
+as it will block access to the data for all other consumers until the closure completes.
+
+## Put it in your project
+
+```
+# in Cargo.toml:
+[dependencies]
+mvdb = "0.2"
+
+# in your Rust code:
+extern crate mvdb;
+```
 
 ## Example
 
 ```rust
 #[macro_use] extern crate serde_derive;
 extern crate mvdb;
-
 use std::path::Path;
 
-use mvdb::Mvdb;
-use mvdb::errors::*;
-
-#[derive(Deserialize, Serialize, Debug, Default, Hash)]
-struct MyData {
-    just_one: InnerData,
-    multiple: Vec<InnerData>,
-}
-
-#[derive(Deserialize, Serialize, Debug, Default, Hash)]
-struct InnerData {
+#[derive(Deserialize, Serialize)]
+struct DemoData {
     foo: String,
     bar: Vec<u8>,
     baz: String,
 }
 
-fn run() -> Result<()> {
-    // Create the database and storage file. If `demo.json` does not exist,
-    // it will be created with default values
-    let file = Path::new("demo.json");
-    let db: Mvdb<MyData> = Mvdb::from_file_or_default(&file)?;
-
-    // Access the database contents atomically via a closure. You may
-    // optionally return a value (of any type) from the closure, which will
-    // be wrapped in a Result. Immutable reads are made from memory only,
-    // and will not result in any file access or writes
-    let y = db.access(|data| {
-        // Data can be used immutably within the access
-        for i in data.multiple.iter() {
-            println!("baz: {}", i.baz);
-        }
-
-        // When returning data, it must be cloned, as references must not
-        // outlive the atomic lock
-        data.just_one.foo.clone()
-    })?;
-    println!("y: {:?}", y);
-
-    // Access the database contents atomically via a closure. You may
-    // optionally return a value (of any type) from the closure, which will
-    // be wrapped in a Result. When using the `use-hashable` feature, changes
-    // will be written if the database contents changed. Otherwise, the file
-    // will be rewritten after every `access_mut()`
-    let z = "thisisatest".into();
-    let x = InnerData {
-        foo: "tacos".into(),
-        bar: vec!(0, 1, 2),
-        baz: "burritos".into(),
-    };
-
-    db.access_mut(|data: &mut NotADb| {
-        data.just_one.foo = z;
-        data.multiple.push(x);
-    })?;
-
-    Ok(())
-}
-
 fn main() {
-    assert!(run().is_ok());
+    let file = Path::from_file("demo.json")
+    let my_data: Mvdb<DemoData> = Mvdb::from_file(&file)
+        .expect("File does not exist, or schema mismatch");
+
+    // Read access
+    let foo_from_disk = my_data.access(|db| db.foo.clone())
+        .expect("Failed to access file");
+
+    // Write access
+    my_data.access_mut(|db: &mut DemoData| {
+        db.baz = "New Value".into();
+    }).expect("Failed to access file");
 }
 ```
+
+Check out a larger example [here](./examples/demo.rs), or run `cargo run --example demo` after cloning.
+
+## Warnings
+
+### File Writes and Performance
+
+Generally, `mvdb` is not meant to be used as a high performance database, but rather for data that changes rarely, such as updating
+a token once a day, occasionally adding information, or configuration that can be changed on-the-fly. **Every time data within the
+structure is changed, the ENTIRE FILE will be rewritten**.
+
+If you have fields that change rapidly, but do not need to be persisted to disk, such as a `VecDeque` of messages, you can use
+the serde `#[skip]` directive to omit this field from storage, and writes to these fields will not cause a write to the
+backing file. `mvdb` also respects other [Serde Attributes](https://serde.rs/attributes.html), which may be used to affect
+behavior as desired.
+
+### Schemas
+
+`mvdb` makes no attempt to handle schemas, and will fail to load any file that does not match the currently known schema.
+It is possible to work around this with the mechanisms that Serde provides, please see this [ticket](https://github.com/serde-rs/serde/issues/745),
+and the linked Reddit thread.
+
+## But I want to use (bincode|toml|something), not JSON!
+
+I hope to someday support those too! Check out [this tracking issue](https://github.com/jamesmunns/mvdb-rs/issues/2) for
+details on blockers and progress on that.
+
+## Pretty Printing
+
+All methods for creating a new `mvdb` offer a `_pretty` variant. This will store the contents using pretty-printed JSON,
+at the cost of additional size. This can be useful during development, or when humans are expected to modify or inspect
+the stored contents
+
+## Default
+
+If the data you are storing implements the `Default` trait, either through `#[derive(Default)]`, or by manually implementing
+the trait, then you can use the `from_file_or_default` method. This will attempt to load the file, or if that fails, a new file
+will be created with default data. This is useful for configuration files with sane defaults, or when the file is expected to
+be generated on first run
 
 ## License
 

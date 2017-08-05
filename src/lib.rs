@@ -1,207 +1,136 @@
+// MIT License
+//
+// Copyright (c) 2017 Anthony James Munns
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
+//! # MVDB: Minimum Viable (Psuedo) Database
+//!
+//! Have you ever thought to yourself, "I would like to keep some data persistently, but can't be bothered to do it well or performantly"? Well, you've found just the right library.
+//!
+//! If your use case is:
+//!
+//! * Very rare writes, but lots of reads
+//! * Data access is shared across multiple threads
+//! * Your data structure is not particularly large
+//! * You are already using `Serde` to serialize some or all of your data
+//! * Your use case feels a little too simple to use even `sqlite`
+//! * Your data format/schema never changes, or only changes by adding, or you are willing to handle migrations yourself
+//!
+//! Then you might like `mvdb`!
+//!
+//! ## How it works
+//!
+//! `mvdb` takes a `Serializable` and `Deserializable` Rust data structure, and uses `serde_json` to represent this data in
+//! a file. After the initial file load, all read-accesses are made from in-memory, rather than re-reading from file. After any
+//! mutable or read-write-access, the contents of the data is checked for changes. If the contents have been modified, they
+//! will be pushed back to the file. All accesses, read-only and read-write, are made atomically.
+//!
+//! Access to the structure is made in a transactional manner, via closures. Care should be taken not to block within these closures,
+//! as it will block access to the data for all other consumers until the closure completes.
+//!
+//! ## Put it in your project
+//!
+//! ```
+//! # in Cargo.toml:
+//! [dependencies]
+//! mvdb = "0.2"
+//!
+//! # in your Rust code:
+//! extern crate mvdb;
+//! ```
+//!
+//! ## Example
+//!
+//! ```rust
+//! #[macro_use] extern crate serde_derive;
+//! extern crate mvdb;
+//! use std::path::Path;
+//!
+//! #[derive(Deserialize, Serialize)]
+//! struct DemoData {
+//!     foo: String,
+//!     bar: Vec<u8>,
+//!     baz: String,
+//! }
+//!
+//! fn main() {
+//!     let file = Path::from_file("demo.json")
+//!     let my_data: Mvdb<DemoData> = Mvdb::from_file(&file)
+//!         .expect("File does not exist, or schema mismatch");
+//!
+//!     // Read access
+//!     let foo_from_disk = my_data.access(|db| db.foo.clone())
+//!         .expect("Failed to access file");
+//!
+//!     // Write access
+//!     my_data.access_mut(|db: &mut DemoData| {
+//!         db.baz = "New Value".into();
+//!     }).expect("Failed to access file");
+//! }
+//! ```
+//!
+//! ## Warnings
+//!
+//! ### File Writes and Performance
+//!
+//! Generally, `mvdb` is not meant to be used as a high performance database, but rather for data that changes rarely, such as updating
+//! a token once a day, occasionally adding information, or configuration that can be changed on-the-fly. **Every time data within the
+//! structure is changed, the ENTIRE FILE will be rewritten**.
+//!
+//! If you have fields that change rapidly, but do not need to be persisted to disk, such as a `VecDeque` of messages, you can use
+//! the serde `#[skip]` directive to omit this field from storage, and writes to these fields will not cause a write to the
+//! backing file. `mvdb` also respects other [Serde Attributes](https://serde.rs/attributes.html), which may be used to affect
+//! behavior as desired.
+//!
+//! ### Schemas
+//!
+//! `mvdb` makes no attempt to handle schemas, and will fail to load any file that does not match the currently known schema.
+//! It is possible to work around this with the mechanisms that Serde provides, please see this [ticket](https://github.com/serde-rs/serde/issues/745),
+//! and the linked Reddit thread.
+//!
+//! ## But I want to use (bincode|toml|something), not JSON!
+//!
+//! I hope to someday support those too! Check out [this tracking issue](https://github.com/jamesmunns/mvdb-rs/issues/2) for
+//! details on blockers and progress on that.
+//!
+//! ## Pretty Printing
+//!
+//! All methods for creating a new `mvdb` offer a `_pretty` variant. This will store the contents using pretty-printed JSON,
+//! at the cost of additional size. This can be useful during development, or when humans are expected to modify or inspect
+//! the stored contents
+//!
+//! ## Default
+//!
+//! If the data you are storing implements the `Default` trait, either through `#[derive(Default)]`, or by manually implementing
+//! the trait, then you can use the `from_file_or_default` method. This will attempt to load the file, or if that fails, a new file
+//! will be created with default data. This is useful for configuration files with sane defaults, or when the file is expected to
+//! be generated on first run
+
 #[macro_use]
 extern crate error_chain;
 extern crate serde;
-
 // TODO: generic across all serializers/deserializers?
 extern crate serde_json;
 
-use std::fs::File;
-use std::io::prelude::*;
-use std::ops::Deref;
-use std::ops::DerefMut;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
+pub mod helpers;
+pub mod errors;
 
-use serde::Serialize;
-use serde::de::DeserializeOwned;
-
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-
-pub mod errors {
-    error_chain!{}
-}
-
-use errors::*;
-
-/// Minimum Viable Psuedo Database
-pub struct Mvdb<T> {
-    inner: Arc<Mutex<T>>,
-    file_path: PathBuf,
-    pretty: bool,
-}
-
-/// Implement `Clone` manually, otherwise Rust expects `T` to also impl `Clone`,
-/// which is not necessary
-impl<T> Clone for Mvdb<T> {
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-            file_path: self.file_path.clone(),
-            pretty: self.pretty,
-        }
-    }
-}
-
-impl<T> Mvdb<T>
-where
-    T: Serialize + DeserializeOwned,
-{
-    /// Create a new `Mvdb` given data to contain and path to store.
-    /// File will be created and written to immediately
-    pub fn new(data: T, path: &Path, pretty: bool) -> Result<Self> {
-        let new_self = Self::new_no_write(data, path, pretty);
-        new_self.write()?;
-        Ok(new_self)
-    }
-
-    /// Create a new `Self`, but do not flush to file
-    fn new_no_write(data: T, path: &Path, pretty: bool) -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(data)),
-            file_path: path.to_path_buf(),
-            pretty: pretty,
-        }
-    }
-
-    /// Create a new `Mvdb` given just the path. If the file does
-    /// not exist, or the contained data does not match the schema
-    /// of `T`, this will return an Error
-    pub fn from_file(path: &Path, pretty: bool) -> Result<Self> {
-        let contents = just_load(&path)?;
-        Ok(Self::new_no_write(contents, path, pretty))
-    }
-
-    /// Provide atomic writable access to the database contents via a closure.
-    /// If the hash of the contents after the access has changed, the database
-    /// will be written to the file.
-    pub fn access_mut<F, R>(&self, action: F) -> Result<R>
-    where
-        F: FnOnce(&mut T) -> R,
-    {
-        let mut x = self.lock()?;
-        let mut y = x.deref_mut();
-        let (_, hash_before) = hash_by_serialize(&y, self.pretty)?;
-        let ret = action(y);
-        let (ser, hash_after) = hash_by_serialize(&y, self.pretty)?;
-
-        if hash_before != hash_after {
-            just_write_string(&ser, &self.file_path)?;
-        }
-
-        Ok(ret)
-    }
-
-    /// Provide atomic read-only access to the database contents via a closure.
-    /// Contents are accessed in-memory only, and will not re-read from the
-    /// storage file, or cause any writes
-    pub fn access<F, R>(&self, action: F) -> Result<R>
-    where
-        F: Fn(&T) -> R,
-    {
-        let x = self.lock()?;
-        let y = x.deref();
-        Ok(action(y))
-    }
-
-    /// Attempt to write `Self` to file
-    fn write(&self) -> Result<()> {
-        if let Ok(inner) = self.inner.lock() {
-            self.write_locked(&inner.deref())
-        } else {
-            bail!("Failed to write")
-        }
-    }
-
-    /// Raw write to file without locks
-    fn write_locked(&self, inner: &T) -> Result<()> {
-        just_write(&inner.deref(), &self.file_path, self.pretty)
-    }
-
-    /// Return the MutexGuard for `Mvdb`
-    fn lock(&self) -> Result<MutexGuard<T>> {
-        match self.inner.lock() {
-            Err(_) => bail!("failed to lock"),
-            Ok(lock) => Ok(lock),
-        }
-    }
-}
-
-impl<T> Mvdb<T>
-where
-    T: Serialize + DeserializeOwned + Default,
-{
-    /// Create a new `Mvdb` given data to contain and path to store.
-    /// File will be created and written to immediately
-    pub fn from_file_or_default(path: &Path, pretty: bool) -> Result<Self> {
-        match just_load(path) {
-            Ok(data) => Ok(Self::new_no_write(data, path, pretty)),
-            Err(_) => Self::new(T::default(), path, pretty),
-        }
-    }
-}
-
-/// Use the default hasher to obtain the hash of an item
-fn hash_by_serialize<T>(data: &T, pretty: bool) -> Result<(String, u64)>
-where
-    T: Serialize,
-{
-    let serializer = match pretty {
-        true => serde_json::to_string_pretty,
-        false => serde_json::to_string,
-    };
-
-    let mut hasher = DefaultHasher::new();
-    let serialized = serializer(data)
-        .chain_err(|| "Failed to serialize for hashing")?;
-    serialized.hash(&mut hasher);
-    Ok((serialized, hasher.finish()))
-}
-
-/// Attempt to load the contents of a serialized file to a `T`.
-/// If anything goes wrong (file not available, schema mismatch),
-//  an error will be returned
-pub fn just_load<T>(path: &Path) -> Result<T>
-where
-    T: DeserializeOwned,
-{
-    let mut file = File::open(path)
-        .chain_err(|| format!("Failed to open file: {:?}", &path))?;
-    let mut contents = String::new();
-    let _ = file.read_to_string(&mut contents);
-    serde_json::from_str(&contents).chain_err(|| "Deserialize error")
-}
-
-/// Attempt to write the contents of a `T` to a serialized file.
-/// If anything goes wrong (file not writable, serialization failed),
-//  an error will be returned
-pub fn just_write<T>(contents: &T, path: &Path, pretty: bool) -> Result<()>
-where
-    T: Serialize,
-{
-    let serializer = match pretty {
-        true => serde_json::to_string_pretty,
-        false => serde_json::to_string,
-    };
-
-    just_write_string(&serializer(contents)
-        .chain_err(|| "Failed to serialize")?, path)
-}
-
-
-/// Attempt to write the contents to a serialized file.
-/// Useful when the contents have already been serialized
-pub fn just_write_string(contents: &str, path: &Path) -> Result<()>
-{
-    let mut file = File::create(path)
-        .chain_err(|| format!("Failed to create file: {:?}", path))?;
-    let _ = file.write_all(contents.as_bytes())
-        .chain_err(|| "Failed to write to file")?;
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn it_works() {}
-}
+mod mvdb;
+pub use mvdb::*;
